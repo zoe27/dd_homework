@@ -6,7 +6,7 @@
 
 - 监听个人钉钉群中转发的家校本作业卡片
 - 识别日期、科目、作业条目及图片
-- `@bot 总结打印` 触发：生成 Word 文档并发送打印任务
+- `@bot 总结打印` 触发：生成 PDF 文档并发送打印任务
 - 支持多科目、图片嵌入，按科目顺序排版
 
 ## 使用流程
@@ -18,13 +18,14 @@
 1. 在钉钉家校本查看老师发布的作业卡片
 2. 将卡片转发到你与 Bot 的个人群
 3. 发送 `@bot 总结打印`
-4. Bot 解析所有卡片，生成 Word 文档并打印
+4. Bot 解析所有卡片，生成 PDF 文档并打印
 5. 群内收到回复：`✓ 已打印，共 N 科 M 条作业`
 
 ## 环境要求
 
 - Python 3.11+
 - macOS（打印使用 `lp` 命令）；Windows 需额外安装 `pywin32`
+- 无需安装 Word / WPS，PDF 由 reportlab 直接生成
 
 ## 安装
 
@@ -55,16 +56,38 @@ DINGTALK_APP_SECRET=your_app_secret
 
 ## 启动
 
+### 真实模式（连接钉钉）
+
 ```bash
-# 连接真实钉钉
 python main.py
+```
 
-# Mock 模式（不需要钉钉，用本地测试数据）
-python main.py --mock --no-print   # 只生成文档
-python main.py --mock              # 生成文档并打印
+### Mock 模式（本地测试，无需钉钉）
 
-# 使用自定义测试数据
+**只生成 PDF，不打印：**
+
+```bash
+python main.py --mock --no-print
+```
+
+PDF 保存在 `output/今日作业_YYYYMMDD.pdf`，可手动打开查看。
+
+**生成 PDF 并自动打印：**
+
+```bash
+python main.py --mock
+```
+
+**使用自定义测试数据：**
+
+```bash
 python main.py --mock --input path/to/messages.json
+```
+
+**单独测试 PDF 生成效果：**
+
+```bash
+python -m generator.pdf_generator
 ```
 
 ## 项目结构
@@ -85,7 +108,7 @@ dd_homework/
 │   └── card_parser.py       # 家校本卡片解析
 │
 ├── generator/
-│   └── docx_generator.py    # Word 文档生成
+│   └── pdf_generator.py     # PDF 文档生成（reportlab）
 │
 ├── printer/
 │   └── printer.py           # 系统打印
@@ -128,6 +151,6 @@ dd_homework/
 | `DINGTALK_APP_SECRET` | 钉钉应用 AppSecret | 必填 |
 | `SUBJECT_ORDER` | 科目排列顺序 | 语数英科道体美音 |
 | `MESSAGE_STORE_LIMIT` | 消息缓存条数上限 | 100 |
-| `OUTPUT_DIR` | Word 文档保存目录 | `./output` |
+| `OUTPUT_DIR` | PDF 文档保存目录 | `./output` |
 | `PRINTER_NAME` | 指定打印机，留空用默认 | 空 |
 | `LOG_LEVEL` | 日志级别 | INFO |
