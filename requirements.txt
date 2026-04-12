@@ -1,0 +1,11 @@
+# 钉钉 Stream SDK
+dingtalk-stream==0.24.3
+
+# Word 文档生成
+python-docx==1.1.2
+
+# 数据配置
+python-dotenv==1.0.1
+
+# 日志
+loguru==0.7.2

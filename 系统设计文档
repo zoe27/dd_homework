@@ -1,0 +1,192 @@
+钉钉作业 Bot — 系统设计文档
+
+一、系统架构
+
+                    DingTalk 服务器
+                         │
+                         │  Stream SDK（WebSocket 长连接，本机主动发起）
+                         ▼
+              ┌─────────────────────┐
+              │   bot/handler.py    │  ← 消息路由
+              │   bot/listener.py   │  ← 监听所有群消息
+              └──────────┬──────────┘
+                         │
+              ┌──────────▼──────────┐
+              │   bot/store.py      │  ← 消息缓存（内存）
+              └──────────┬──────────┘
+                         │  @bot 总结打印 触发
+                         ▼
+              ┌─────────────────────┐
+              │  parser/card_parser │  ← 解析家校本卡片
+              └──────────┬──────────┘
+                         │
+              ┌──────────▼──────────┐
+              │  utils/downloader   │  ← 下载图片到本地
+              └──────────┬──────────┘
+                         │
+              ┌──────────▼──────────┐
+              │  generator/docx_    │  ← 生成 Word 文档
+              │  generator.py       │
+              └──────────┬──────────┘
+                         │
+              ┌──────────▼──────────┐
+              │  printer/printer.py │  ← 打印
+              └──────────┬──────────┘
+                         │
+                    群回复确认
+
+
+二、数据流
+
+转发消息（文字）  → RawTextMessage
+转发消息（图片）  → RawImageMessage（含下载 URL）
+        │
+        │  [card_parser]
+        ▼
+HomeworkCard[]        — 每张卡片：date / subject / items[] / image_urls[]
+        │
+        │  [docx_generator]
+        ▼
+HomeworkDocument      — 完整作业单，按科目排序
+        │
+        ├─ [python-docx] → 今日作业_20260410.docx
+        └─ [lp / win32]  → 打印机
+
+
+三、数据模型
+
+class HomeworkCard:
+    date: date            # 从标题解析，如 4月10日 → date(2026,4,10)
+    subject: str          # 科目名：语文/数学/英语...
+    items: list[str]      # 作业条目列表
+    image_paths: list[str] # 下载后的本地图片路径
+
+class HomeworkDocument:
+    date: date
+    cards: list[HomeworkCard]   # 已按科目顺序排序
+
+class RawMessage:
+    msg_id: str
+    sender_id: str
+    timestamp: datetime
+    msg_type: str         # "text" | "image" | "mixed"
+    text: str
+    image_url: str | None
+
+
+四、模块详细设计
+
+4.1 bot/store.py — 消息缓存
+
+  - 内存列表，存储 RawMessage
+  - 默认保留最近 100 条
+  - 每次触发打印后清空（避免重复处理）
+
+4.2 bot/handler.py — 指令处理
+
+  触发词：包含 "总结" 或 "打印" 的 @bot 消息
+  流程：
+    1. 从 store 取最近消息
+    2. 调用 card_parser 解析
+    3. 无内容 → 回复"未找到作业内容"
+    4. 有内容 → 生成文档 → 打印 → 回复确认
+
+4.3 parser/card_parser.py — 家校本解析
+
+  标题识别：r"(\d+)月(\d+)日(语文|数学|英语|科学|道法|体育|美术|音乐)"
+  内容识别：标题后每行以数字开头的行
+  多卡片：一次转发多张时按标题分割
+
+  示例输入：
+    "4月10日数学\n1订正知能P17,P18\n2完成知能P19,P20"
+
+  示例输出：
+    HomeworkCard(date=date(2026,4,10), subject="数学",
+                 items=["订正知能P17,P18", "完成知能P19,P20"])
+
+4.4 generator/docx_generator.py — Word 生成
+
+  文档结构：
+    ┌────────────────────┐
+    │   今日作业          │  ← 标题，居中，24pt 加粗
+    │   2026年4月10日     │  ← 副标题，居中，14pt
+    ├────────────────────┤
+    │ 【数学】            │  ← 科目，加粗
+    │  1. 订正知能P17,P18 │
+    │  2. 完成知能P19,P20 │
+    │  [课本图片]         │
+    ├────────────────────┤
+    │ 【语文】            │
+    │  1. 背诵第三课课文   │
+    └────────────────────┘
+
+  图片：宽度自适应页面（最大 14cm），保持比例
+
+4.5 printer/printer.py — 打印
+
+  macOS：subprocess.run(["lp", docx_path])
+  Windows：win32api.ShellExecute(..., "print", ...)
+  打印失败：记录日志，不抛异常，文档保留
+
+4.6 utils/downloader.py — 图片下载
+
+  将钉钉图片 URL 下载到 ./output/tmp/
+  命名：{msg_id}_{index}.jpg
+  供 docx_generator 嵌入后保留（随文档一起存档）
+
+
+五、目录结构
+
+dd_homework/
+├── main.py                    # 入口：启动 Stream SDK 客户端
+├── config.py                  # 配置：AppKey/AppSecret/群ID/科目顺序等
+│
+├── bot/
+│   ├── __init__.py
+│   ├── handler.py             # @mention 指令处理，串联全流程
+│   ├── listener.py            # 监听所有群消息，存入 store
+│   └── store.py               # 消息内存缓存
+│
+├── parser/
+│   ├── __init__.py
+│   └── card_parser.py         # 家校本卡片文本解析
+│
+├── generator/
+│   ├── __init__.py
+│   └── docx_generator.py      # Word 文档生成
+│
+├── printer/
+│   ├── __init__.py
+│   └── printer.py             # 跨平台打印
+│
+├── utils/
+│   ├── logger.py              # loguru 日志
+│   └── downloader.py          # 图片下载
+│
+├── models/
+│   └── models.py              # 数据模型
+│
+├── output/                    # 生成的 Word 文档 + 图片缓存
+├── logs/                      # 运行日志
+└── requirements.txt
+
+
+六、配置项 config.py
+
+DINGTALK_APP_KEY    = ""          # 钉钉应用 AppKey
+DINGTALK_APP_SECRET = ""          # 钉钉应用 AppSecret
+TARGET_GROUP_ID     = ""          # 监听的群 ID
+SUBJECT_ORDER       = ["语文","数学","英语","科学","道法","体育","美术","音乐"]
+MESSAGE_STORE_LIMIT = 100         # 缓存消息条数上限
+OUTPUT_DIR          = "./output"
+
+
+七、钉钉应用配置说明
+
+1. 登录 open.dingtalk.com，创建"企业内部应用"
+2. 添加能力：机器人
+3. 权限申请：
+   - 读取群消息（接收所有群消息，非仅@mention）
+   - 发送群消息
+4. 在应用管理中获取 AppKey 和 AppSecret
+5. 填入 config.py 或 .env 文件

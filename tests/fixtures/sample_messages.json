@@ -1,0 +1,38 @@
+[
+  {
+    "msg_id": "msg001",
+    "sender_id": "teacher_wang",
+    "sender_name": "王老师",
+    "timestamp": "2026-04-12T15:30:00",
+    "msg_type": "text",
+    "text": "4月12日语文\n1背诵第三课课文\n2完成练习册第5页\n3预习第四课生字",
+    "image_url": null
+  },
+  {
+    "msg_id": "msg002",
+    "sender_id": "teacher_li",
+    "sender_name": "李老师",
+    "timestamp": "2026-04-12T15:45:00",
+    "msg_type": "text",
+    "text": "4月12日数学\n1口算100题\n2完成第47页第1-5题\n3预习第48页例题",
+    "image_url": null
+  },
+  {
+    "msg_id": "msg003",
+    "sender_id": "teacher_zhao",
+    "sender_name": "赵老师",
+    "timestamp": "2026-04-12T16:00:00",
+    "msg_type": "text",
+    "text": "4月12日英语\n1听写单词20个\n2朗读课文三遍",
+    "image_url": null
+  },
+  {
+    "msg_id": "msg004",
+    "sender_id": "teacher_wang",
+    "sender_name": "王老师",
+    "timestamp": "2026-04-12T16:10:00",
+    "msg_type": "text",
+    "text": "4月12日科学\n1完成实验报告\n2明天带实验材料",
+    "image_url": null
+  }
+]
