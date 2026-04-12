@@ -28,7 +28,7 @@ def run_mock(input_path: str, skip_print: bool = False):
     from bot.store import store
     from parser.card_parser import parse_messages, sort_cards
     from models.models import HomeworkDocument
-    from generator.docx_generator import generate
+    from generator.pdf_generator import generate
     from utils.downloader import download_images
 
     logger.info(f"Mock 模式，加载: {input_path}")

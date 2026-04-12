@@ -20,7 +20,8 @@ from models.models import HomeworkDocument
 from utils.downloader import download_images
 
 # 触发词：@bot 消息中包含任意一个即触发
-TRIGGER_WORDS = ["总结", "打印", "作业"]
+# 注意：不要用"作业"，作业卡片内容本身就含这个词，会导致每条消息都触发打印
+TRIGGER_WORDS = ["总结打印", "打印作业", "打印"]
 
 
 def is_trigger(text: str) -> bool:
@@ -34,7 +35,7 @@ def run_pipeline(reply_func) -> str:
     reply_func: 向群发送消息的回调，签名 reply_func(text: str)
     返回最终回复文本（同时也通过 reply_func 发出）
     """
-    from generator.docx_generator import generate
+    from generator.pdf_generator import generate
     from printer.printer import print_file
 
     messages = store.get_all()
