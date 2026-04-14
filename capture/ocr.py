@@ -1,5 +1,5 @@
 """
-Apple Vision OCR 模块
+OCR 模块（基于 easyocr）
 
 识别 PIL Image 中的文字，返回带坐标的结果列表。
 运行测试：python -m capture.ocr <image_path>
@@ -7,22 +7,36 @@ Apple Vision OCR 模块
 
 import sys
 import os
-import objc
+import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from PIL import Image
 from utils.logger import logger
 
+# 全局 reader 单例，避免重复加载模型（首次加载约需几秒）
+_reader = None
+
+
+def _get_reader():
+    global _reader
+    if _reader is None:
+        import easyocr
+        logger.info("加载 easyocr 中文模型（首次加载需要几秒）...")
+        _reader = easyocr.Reader(['ch_sim', 'en'], verbose=False)
+        logger.info("easyocr 模型加载完成")
+    return _reader
+
 
 class OcrResult:
     """单条 OCR 识别结果"""
-    def __init__(self, text: str, x: int, y: int, w: int, h: int):
+    def __init__(self, text: str, x: int, y: int, w: int, h: int, conf: float = 1.0):
         self.text = text
-        self.x = x      # 屏幕坐标（像素）
+        self.x = x
         self.y = y
         self.w = w
         self.h = h
+        self.conf = conf
 
     @property
     def center_x(self) -> int:
@@ -33,82 +47,42 @@ class OcrResult:
         return self.y + self.h // 2
 
     def __repr__(self):
-        return f"OcrResult({self.text!r}, x={self.x}, y={self.y})"
+        return f"OcrResult({self.text!r}, x={self.x}, y={self.y}, conf={self.conf:.2f})"
 
 
-def recognize(img: Image.Image, window_x: int = 0, window_y: int = 0) -> list[OcrResult]:
+def recognize(img: Image.Image, window_x: int = 0, window_y: int = 0,
+              min_conf: float = 0.3) -> list[OcrResult]:
     """
     对 PIL Image 做 OCR，返回 OcrResult 列表。
     window_x/y: 窗口在屏幕上的偏移，用于将图片坐标换算为屏幕坐标。
+    min_conf: 最低置信度，低于此值的结果过滤掉。
     """
-    try:
-        import Vision
-        import Quartz
-        from Foundation import NSURL
-        import objc
-    except ImportError:
-        raise RuntimeError("请安装：pip install pyobjc-framework-Vision")
+    reader = _get_reader()
 
-    import tempfile, io
-
-    # Vision 需要从文件或 CGImage 读取，先存为临时 PNG
-    # 写入 144 DPI，告知 Vision 这是 Retina 2x 截图，否则中文识别会乱码
+    # easyocr 接受文件路径或 numpy array，用临时文件传入
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         tmp_path = tmp.name
-    img.save(tmp_path, dpi=(144, 144))
-
     try:
-        results = _run_vision(tmp_path, img.width, img.height, window_x, window_y)
+        img.save(tmp_path)
+        raw = reader.readtext(tmp_path)
     finally:
         os.unlink(tmp_path)
 
-    return results
-
-
-def _run_vision(image_path: str, img_w: int, img_h: int,
-                win_x: int, win_y: int) -> list[OcrResult]:
-    """调用 Vision VNRecognizeTextRequest"""
-    import Vision
-    from Foundation import NSURL, NSArray
-
-    url = NSURL.fileURLWithPath_(image_path)
-    request_handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, {})
-
-    request = Vision.VNRecognizeTextRequest.alloc().init()
-    request.setRecognitionLevel_(1)          # 1 = accurate
-    request.setUsesLanguageCorrection_(False)
-    # request.setRecognitionLanguages_(NSArray.arrayWithArray_(["zh-Hans", "zh-Hant", "en"]))
-    request.setRecognitionLanguages_(["zh-Hans"])
-    request.setAutomaticallyDetectsLanguage_(False)
-
-    error_ptr = objc.nil
-    request_handler.performRequests_error_(NSArray.arrayWithArray_([request]), None)
-
     results = []
-    observations = request.results()
-    if not observations:
-        return results
-
-    for obs in observations:
-        text = obs.topCandidates_(1)[0].string()
-        if not text:
+    for bbox, text, conf in raw:
+        if conf < min_conf or not text.strip():
             continue
 
-        # boundingBox: 归一化坐标，原点在左下角
-        box = obs.boundingBox()
-        x_norm = box.origin.x
-        y_norm = box.origin.y
-        w_norm = box.size.width
-        h_norm = box.size.height
+        # bbox 是四个角点 [[x1,y1],[x2,y1],[x2,y2],[x1,y2]]
+        xs = [p[0] for p in bbox]
+        ys = [p[1] for p in bbox]
+        x = int(min(xs)) + window_x
+        y = int(min(ys)) + window_y
+        w = int(max(xs) - min(xs))
+        h = int(max(ys) - min(ys))
 
-        # 转换为像素坐标（Vision Y轴翻转）
-        px = int(x_norm * img_w) + win_x
-        py = int((1.0 - y_norm - h_norm) * img_h) + win_y
-        pw = int(w_norm * img_w)
-        ph = int(h_norm * img_h)
-
-        results.append(OcrResult(text, px, py, pw, ph))
-        logger.debug(f"OCR: {text!r}  ({px},{py})")
+        results.append(OcrResult(text, x, y, w, h, conf))
+        logger.debug(f"OCR: {text!r}  conf={conf:.2f}  ({x},{y})")
 
     return results
 
@@ -127,4 +101,4 @@ if __name__ == "__main__":
     items = recognize(img)
     print(f"\n识别到 {len(items)} 条文字：\n")
     for item in items:
-        print(f"  [{item.x:4d},{item.y:4d}] {item.text}")
+        print(f"  [{item.x:4d},{item.y:4d}] conf={item.conf:.2f}  {item.text}")
