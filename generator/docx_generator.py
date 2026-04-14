@@ -66,7 +66,7 @@ def _add_card(doc: Document, card: HomeworkCard) -> None:
             continue
         try:
             doc.add_picture(img_path, width=Cm(IMAGE_MAX_WIDTH_CM))
-            logger.debug(f"已插入图片: {img_path}")
+            logger.info(f"已插入图片: {img_path}")
         except Exception as e:
             logger.warning(f"图片插入失败: {img_path} — {e}")
 

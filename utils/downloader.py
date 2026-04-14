@@ -33,7 +33,7 @@ def download_image(url: str, msg_id: str, index: int = 0) -> str | None:
 
     try:
         urllib.request.urlretrieve(url, local_path)
-        logger.debug(f"图片下载成功: {filename}")
+        logger.info(f"图片下载成功: {filename}")
         return local_path
     except Exception as e:
         logger.warning(f"图片下载失败: {url} — {e}")

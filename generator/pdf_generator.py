@@ -53,7 +53,7 @@ def _register_fonts():
                 pdfmetrics.registerFont(TTFont(_FONT_BOLD_NAME, path, subfontIndex=1))
             except Exception:
                 pdfmetrics.registerFont(TTFont(_FONT_BOLD_NAME, path, subfontIndex=0))
-            logger.debug(f"已注册字体: {path}")
+            logger.info(f"已注册字体: {path}")
             return True
         except Exception as e:
             logger.warning(f"字体注册失败 {path}: {e}")

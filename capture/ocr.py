@@ -51,11 +51,13 @@ class OcrResult:
 
 
 def recognize(img: Image.Image, window_x: int = 0, window_y: int = 0,
-              min_conf: float = 0.3) -> list[OcrResult]:
+              min_conf: float = 0.3, scale: float = 1.0) -> list[OcrResult]:
     """
     对 PIL Image 做 OCR，返回 OcrResult 列表。
-    window_x/y: 窗口在屏幕上的偏移，用于将图片坐标换算为屏幕坐标。
-    min_conf: 最低置信度，低于此值的结果过滤掉。
+    window_x/y: 窗口在屏幕上的逻辑坐标偏移。
+    scale: Retina 缩放比例（物理像素/逻辑像素），通常 Retina 屏为 2.0。
+           OCR bbox 是物理像素，除以 scale 转为逻辑坐标后再加偏移。
+    min_conf: 最低置信度。
     """
     reader = _get_reader()
 
@@ -73,16 +75,17 @@ def recognize(img: Image.Image, window_x: int = 0, window_y: int = 0,
         if conf < min_conf or not text.strip():
             continue
 
-        # bbox 是四个角点 [[x1,y1],[x2,y1],[x2,y2],[x1,y2]]
+        # bbox 是四个角点 [[x1,y1],[x2,y1],[x2,y2],[x1,y2]]，物理像素
+        # 除以 scale 转为逻辑坐标，再加窗口偏移得到屏幕坐标
         xs = [p[0] for p in bbox]
         ys = [p[1] for p in bbox]
-        x = int(min(xs)) + window_x
-        y = int(min(ys)) + window_y
-        w = int(max(xs) - min(xs))
-        h = int(max(ys) - min(ys))
+        x = int(min(xs) / scale) + window_x
+        y = int(min(ys) / scale) + window_y
+        w = int((max(xs) - min(xs)) / scale)
+        h = int((max(ys) - min(ys)) / scale)
 
         results.append(OcrResult(text, x, y, w, h, conf))
-        logger.debug(f"OCR: {text!r}  conf={conf:.2f}  ({x},{y})")
+        logger.info(f"OCR: {text!r}  conf={conf:.2f}  ({x},{y})")
 
     return results
 

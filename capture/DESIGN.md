@@ -11,135 +11,93 @@
 
 ```
 capture/
-  find_window.py   找到钉钉主窗口，获取坐标和 window ID
-  screenshot.py    按 window ID 截图，支持持续截图+滚动
-  ocr.py           Apple Vision OCR，返回文字内容和边界框坐标
-  scraper.py       主流程，串联所有模块，返回作业文字列表
+  find_window.py    找到钉钉主窗口，获取坐标和 window ID
+  screenshot.py     按 window ID 截图；激活窗口
+  ocr.py            easyocr 中文 OCR，返回带屏幕逻辑坐标的结果列表
+  scraper.py        主流程（AI家校本入口版）
+  scraper_scroll.py 旧版（群聊滚动扫描，已废弃，保留备用）
 ```
 
 ---
 
-## 完整流程
+## 当前方案：AI家校本入口
+
+### 流程概览
 
 ```
-激活钉钉窗口（带到前台）
+激活钉钉窗口，进入目标群聊
   ↓
-【第一阶段：滚到底部】
-连续向下滚动（delta=-15），直到连续 2 次底部截图相同，确保在最新消息处
+步骤1：OCR 识别底部导航栏，找到"AI家校本"按钮并点击
   ↓
-【第二阶段：从底部向上扫描】
-┌──────────────────────────────────────────────┐
-│  截图当前屏幕                                  │
-│  ↓                                            │
-│  OCR 识别截图，打印所有识别到的文字和坐标       │
-│  ↓                                            │
-│  终止条件检查：                                │
-│    发现独立时间戳（"昨天"、"04/09"等旧日期）？  │
-│    ├── 是 → 停止扫描                           │
-│    └── 否 → 继续                              │
-│  ↓                                            │
-│  家校本卡片识别：                              │
-│    有"家校本"字样？                            │
-│    ├── 否 → 跳过                              │
-│    └── 是 → 提取卡片日期：                    │
-│              优先从"截止时间：XX月XX日"提取    │
-│              其次从标题"X月X日科目"提取        │
-│              ↓                                │
-│              日期 < 今天 → 不点击，继续滚动    │
-│              日期 = 今天 → 提取科目名          │
-│                ↓                              │
-│                科目已收集过 → 跳过（去重）     │
-│                科目未收集   → 点击卡片         │
-│                  ↓                            │
-│                  等待 1.8s（面板渲染）         │
-│                  截图右侧面板区域（右 2/3）    │
-│                  OCR 提取正文                  │
-│                  过滤底部操作按钮文字          │
-│                  存入 messages 列表            │
-│                  点击左侧区域关闭面板          │
-│                  等待 0.4s                     │
-│  ↓                                            │
-│  向上滚动（delta=+5，小幅度避免跳过卡片）      │
-│  等待 0.6s                                    │
-│  ↓                                            │
-│  顶部条带连续 2 次相同 → 已到顶，退出          │
-└──────────────────────────────────────────────┘
+步骤2：等待面板渲染，点击"全部"tab（查看所有作业，而非只看未完成）
   ↓
-返回 messages 列表 → card_parser → 生成PDF → 打印
+步骤3：OCR 识别作业列表，提取所有"X月X日科目"格式的卡片标题和坐标
+  ↓
+步骤4：循环处理（最多6个）：
+  点击作业卡片
+    ↓
+  等待 1.5s 渲染
+    ↓
+  截图右侧面板 → OCR 提取完整作业内容
+    ↓
+  点击返回按钮"<"（点击行左端 +10px，精准落在箭头上）
+    ↓
+  等待 0.8s，处理下一个
+  ↓
+步骤5：关闭家校本面板
+  优先：OCR 找到"×"按钮点击
+  fallback：点击面板左侧外部区域（群聊区域）关闭
+  ↓
+返回 RawMessage 列表 → card_parser → 生成PDF → 打印
 ```
 
 ---
 
-## 卡片识别逻辑
+## 坐标系说明
 
-家校本卡片在群聊中有两种展示格式：
+这是整个方案最关键的细节，涉及三层坐标转换：
 
-**格式 A：标题含日期**
 ```
-家校本
-4月13日语文
-今天课堂上...（截断）
-截止时间：04月13日22:00
-```
-
-**格式 B：标题只有科目**
-```
-家校本
-数学
-1订正知能P19,P20
-截止时间：04月13日22:00
+截图（物理像素，Retina 2x = 逻辑尺寸 × 2）
+  ↓ 裁剪右侧面板（物理像素偏移）
+  ↓ 传入 easyocr，返回 bbox（物理像素）
+  ↓ ÷ scale（2.0）→ 逻辑像素
+  ↓ + panel_x_logical（面板裁剪偏移，逻辑）
+  ↓ + window["x/y"]（窗口在屏幕上的位置，逻辑）
+  = OcrResult.x/y（屏幕逻辑坐标）✓
+  → 直接传给 CGEventCreateMouseEvent 点击 ✓
 ```
 
-两种格式统一处理：
-1. 检测到"家校本"字样
-2. 优先从"截止时间"提取日期（更稳定），其次从标题提取
-3. 日期确认是今天才点击，早于今天则跳过
-
----
-
-## 终止条件
-
-只依赖**群聊消息时间戳**判断，与卡片内容无关：
-
-- `"昨天"` 独立出现 → 停止
-- `"04/09"`、`"4月9日"` 等早于今天的日期 → 停止
-- 排除含"截止/完成/布置/预计/已"等词的文字，避免把卡片内容误判为时间戳
+关键：`window["width/height"]` 是逻辑尺寸，截图是物理尺寸，`scale = 截图宽 / 窗口逻辑宽`。
 
 ---
 
 ## 各步骤技术细节
 
 ### 激活窗口
-用 `NSWorkspace.sharedWorkspace().runningApplications()` 找到钉钉进程，
-`app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)` 带到前台，等待 0.3s。
-每次发送滚动/点击事件前都会激活，确保事件发到钉钉而非终端。
+`NSWorkspace.sharedWorkspace().runningApplications()` 找到钉钉进程，
+`app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)` 带到前台。
+每次点击前都激活，确保事件发到钉钉。
 
 ### 截图
-`Quartz.CGWindowListCreateImage` 按 window ID 截图，不要求窗口在最前面，被遮挡也能截到（最小化除外）。
+`Quartz.CGWindowListCreateImage` 按 window ID 截图，不要求窗口在最前面。
+只截右侧面板区域（窗口宽度 37% 处往右），减少 OCR 处理量。
 
-### OCR（Apple Vision）
-`VNRecognizeTextRequest`，语言设置 `["zh-Hans", "zh-Hant", "en"]`，accurate 模式。
-每条结果包含文字 + boundingBox（归一化坐标），换算为屏幕坐标时注意 Vision Y 轴翻转。
-
-### 滚动
-`CGEventCreateScrollWheelEvent`，单位 `kCGScrollEventUnitLine`。
-- 向下（滚到底）：delta=-15，幅度大，快速定位
-- 向上（扫描）：delta=+5，幅度小，避免跳过卡片
-- 滚动事件发到**消息区中心**（窗口 x 的 37% 处往右），而不是整个窗口中心，避免滚动到左侧会话列表
-
-### OCR 区域
-钉钉窗口左侧约 37% 是会话列表，右侧 63% 是消息区。
-截图后裁剪右侧消息区再做 OCR，避免识别会话列表的预览文字（字体小、截断、易乱码）。
-面板提取时同样只取右侧 2/3 区域。
+### OCR
+`easyocr`，语言 `['ch_sim', 'en']`，置信度阈值 0.3。
+首次加载模型约需几秒，之后复用单例。
 
 ### 点击
-`CGEventCreateMouseEvent`，mouseDown + mouseUp 组合模拟单击。
-- 点击卡片：使用 OCR 识别到的科目/标题文字的中心坐标
-- 关闭面板：点击窗口左侧 1/6 处的中间位置（群聊区域），稳定可靠
+`CGEventCreateMouseEvent`，mouseDown + mouseUp 模拟单击。
+坐标已经过 scale 转换，直接使用 OcrResult.center_x/y 或 x+offset。
 
-### 面板内容提取
-点击后截图右侧 2/3 区域（面板区域），OCR 后过滤以下无关文字：
-`打印 / 反馈 / 完成时长 / 预计需 / 已截止 / 点此 / ↓ / 家长`
+### 返回按钮
+匹配文字以 `<` 或 `〈` 开头的 OCR 结果（通常是"< 周沐曦的练习"整行）。
+点击 `r.x + 10`（行左端），而非 `center_x`，确保落在箭头上。
+
+### 关闭面板
+优先 OCR 找"×"点击；找不到则点击面板左侧外部区域（`window_x + panel_x/2`），
+利用钉钉"点击外部关闭浮层"的交互特性。
 
 ---
 
@@ -147,35 +105,33 @@ capture/
 
 | 参数 | 值 | 说明 |
 |---|---|---|
-| SCROLL_DOWN_DELTA | -15 | 第一阶段向下滚到底，每次滚动行数 |
-| SCROLL_UP_DELTA | +5 | 第二阶段向上扫描，小幅度避免跳过卡片 |
-| SCROLL_WAIT | 0.6s | 滚动后等待渲染 |
-| CARD_OPEN_WAIT | 1.8s | 点击卡片后等待面板渲染 |
-| CLOSE_WAIT | 0.4s | 关闭面板后等待 |
-| COMPARE_HEIGHT | 120px | 顶部/底部对比区域高度 |
-| SIMILARITY_THRESHOLD | 5.0 | 像素差阈值，低于此值视为相同 |
-| MSG_AREA_X_RATIO | 0.37 | 消息区起始 x 比例，左侧会话列表约占 37% |
-| SAME_COUNT_TO_STOP | 2 | 连续相同次数才判定到顶/底 |
+| CARD_OPEN_WAIT | 1.5s | 点击卡片后等待面板渲染 |
+| MAX_HOMEWORK | 6 | 最多提取作业数量 |
+| panel_x_ratio | 37% | 右侧面板起始位置（窗口宽度比例） |
+| min_conf | 0.3 | OCR 最低置信度 |
 
-| MAX_SCROLL_STEPS | 80 | 最大滚动次数，防止死循环 |
+---
 
-`scraper.py` 返回 `list[RawMessage]`，与现有 `card_parser.parse_messages()` 接口完全兼容。
+## 与现有代码的衔接
+
+`scraper.scrape()` 返回 `list[RawMessage]`，与 `card_parser.parse_messages()` 接口完全兼容。
 
 ```python
 from capture.scraper import scrape
 from parser.card_parser import parse_messages, sort_cards
 
-messages = scrape()           # 自动抓取
+messages = scrape()
 cards = parse_messages(messages)
 cards = sort_cards(cards)
-# → 后续生成PDF、打印，流程不变
+# → 生成PDF → 打印，流程不变
 ```
 
 ---
 
 ## 风险与限制
 
-- 钉钉界面更新后卡片布局可能变化，需重新调整识别逻辑
-- 最小化状态下无法截图，需要钉钉窗口处于正常显示状态
 - 需授权「屏幕录制」和「辅助功能」权限
-- 同科目去重：向上扫描时第一个遇到的是最新版本，后续相同科目跳过
+- 钉钉需处于目标群聊界面，底部能看到"AI家校本"按钮
+- 钉钉界面更新后坐标比例或文字可能变化，需重新调整
+- 最小化状态下无法截图
+- easyocr 首次加载模型需要几秒，后续复用

@@ -70,7 +70,7 @@ class HomeworkBotHandler(dingtalk_stream.ChatbotHandler):
             image_url=image_urls[0] if image_urls else None,
         )
         store.add(raw)
-        logger.debug(f"[缓存] {store}")
+        logger.info(f"[缓存] {store}")
 
         # ── 判断是否为打印指令 ────────────────────────────────────────────────
         def reply(content: str):

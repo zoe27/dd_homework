@@ -72,7 +72,7 @@ def activate_dingtalk(pid: int) -> None:
         if app.processIdentifier() == pid:
             app.activateWithOptions_(1 << 1)  # NSApplicationActivateIgnoringOtherApps
             time.sleep(0.3)  # 等待窗口激活
-            logger.debug(f"已激活钉钉窗口 PID={pid}")
+            logger.info(f"已激活钉钉窗口 PID={pid}")
             return
     logger.warning(f"未找到 PID={pid} 的应用")
 
@@ -106,7 +106,7 @@ def is_same_content(img_a: Image.Image, img_b: Image.Image) -> bool:
     a = bottom_strip(img_a)
     b = bottom_strip(img_b)
     diff = np.abs(a - b).mean()
-    logger.debug(f"底部区域像素差: {diff:.2f}")
+    logger.info(f"底部区域像素差: {diff:.2f}")
     return diff < SIMILARITY_THRESHOLD
 
 
