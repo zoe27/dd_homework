@@ -283,6 +283,15 @@ def step3_scan_card_list(window: dict, debug: bool = False) -> list[dict]:
 
     scroll_to_top(window)
     logger.info(f"步骤3完成，共收集 {len(collected)} 张卡片")
+
+    # 打印作业列表
+    print(f"\n{'─'*50}")
+    print(f"  作业列表（共 {len(collected)} 张）")
+    print(f"{'─'*50}")
+    for i, c in enumerate(collected, 1):
+        print(f"  {i}. {c['key']}")
+    print(f"{'─'*50}\n")
+
     return collected
 
 
@@ -389,12 +398,17 @@ def _extract_detail_content(window: dict, idx: int, debug: bool) -> str:
     results, _ = ocr_panel(window, wait=CARD_OPEN_WAIT,
                             debug_name=f"step4_detail_{idx}_0.png", debug=debug)
 
-    # 检查展开按钮
-    expand_targets = [r for r in results if "∨" in r.text or r.text.strip() == "展开"]
+    # 检查展开按钮（∨ 可能被 OCR 识别为 v/V/∨ 等多种形式）
+    expand_targets = [
+        r for r in results
+        if r.text.strip() in ("∨", "v", "V", "ν") or "展开" in r.text
+    ]
     if expand_targets:
-        logger.info("  发现展开按钮，点击展开")
+        # 取 y 坐标最大的（展开箭头在内容区中间偏下）
+        expand_btn = max(expand_targets, key=lambda r: r.y)
+        logger.info(f"  发现展开按钮 {expand_btn.text!r}，点击展开")
         activate_dingtalk(window["pid"])
-        click(expand_targets[0].center_x, expand_targets[0].center_y)
+        click(expand_btn.center_x, expand_btn.center_y)
         results, _ = ocr_panel(window, wait=EXPAND_WAIT,
                                 debug_name=f"step4_detail_{idx}_expand.png", debug=debug)
 
@@ -462,10 +476,16 @@ def step4_extract_cards(window: dict, card_list: list[dict],
                 text=text,
             ))
 
-        # 点击返回按钮
+        # 点击返回按钮，同时从返回按钮文字提取学生名
         back_results, _ = ocr_panel(window)
         back_btn = _find_back_button(back_results)
+        student_name = ""
         if back_btn:
+            # "< 周晓逸的练习" → 提取 "周晓逸"
+            m = re.search(r"[<〈]\s*(.+?)的练习", back_btn.text)
+            if m:
+                student_name = m.group(1).strip()
+                logger.info(f"  识别学生: {student_name!r}")
             bx = back_btn.x + 10
             by = back_btn.center_y
             logger.info(f"  点击返回: ({bx},{by})  原文={back_btn.text!r}")
@@ -477,6 +497,9 @@ def step4_extract_cards(window: dict, card_list: list[dict],
             logger.warning(f"  未找到返回按钮，点击左上角 ({fallback_x},{fallback_y})")
             activate_dingtalk(window["pid"])
             click(fallback_x, fallback_y)
+
+        if text:
+            messages[-1].sender_name = student_name or "AI家校本"
 
         time.sleep(0.8)
 
@@ -546,4 +569,4 @@ if __name__ == "__main__":
 
     print(f"\n共抓取 {len(msgs)} 科作业：\n")
     for m in msgs:
-        print(f"[{m.msg_id}]\n{m.text}\n{'─'*40}")
+        print(f"[{m.sender_name}] [{m.msg_id}]\n{m.text}\n{'─'*40}")
