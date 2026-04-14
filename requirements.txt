@@ -13,4 +13,5 @@ loguru==0.7.2
 
 # macOS 窗口捕获
 pyobjc-framework-Quartz
+pyobjc-framework-Vision
 numpy
