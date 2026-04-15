@@ -52,7 +52,7 @@ DEBUG_DIR          = os.path.join("output", "tmp", "captures")
 
 SUBJECT_KEYWORDS = config.SUBJECT_ORDER
 RE_CARD_TITLE = re.compile(
-    r"(\d{1,2})月(\d{1,2})日\s*(" +
+    r"(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*(" +
     "|".join(re.escape(s) for s in SUBJECT_KEYWORDS) + r")"
 )
 RE_PUBLISHER = re.compile(r"(.+)发布$")

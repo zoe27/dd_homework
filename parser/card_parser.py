@@ -26,9 +26,9 @@ import config
 # 科目关键词（按长度降序，避免"道法"被"道"先匹配）
 SUBJECTS = sorted(config.SUBJECT_ORDER, key=len, reverse=True)
 
-# 标题正则：匹配 "4月10日数学" / "4月10日 数学" / "04月10日语文"
+# 标题正则：匹配 "4月10日数学" / "4月10日 数学" / "04月10日语文" / "4月 10日数学"（OCR空格容错）
 RE_TITLE = re.compile(
-    r"(\d{1,2})月(\d{1,2})日\s*(" + "|".join(re.escape(s) for s in SUBJECTS) + r")"
+    r"(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*(" + "|".join(re.escape(s) for s in SUBJECTS) + r")"
 )
 
 # 作业条目正则：数字编号开头，如 "1订正知能" / "2. 完成练习册" / "①背诵"

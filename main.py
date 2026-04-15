@@ -13,11 +13,63 @@ from utils.logger import logger
 def parse_args():
     parser = argparse.ArgumentParser(description="钉钉作业 Bot")
     parser.add_argument("--mock", action="store_true", help="使用本地测试数据，不连接钉钉")
+    parser.add_argument("--capture", action="store_true", help="截图抓取模式：自动从钉钉客户端抓取作业")
     parser.add_argument("--input", type=str,
                         default="tests/fixtures/sample_messages.json",
                         help="mock 模式的输入文件（默认 tests/fixtures/sample_messages.json）")
-    parser.add_argument("--no-print", action="store_true", help="mock 模式下跳过打印，只生成文档")
+    parser.add_argument("--no-print", action="store_true", help="跳过打印，只生成文档")
+    parser.add_argument("--debug", action="store_true", help="capture 模式下保存调试截图")
     return parser.parse_args()
+
+
+def run_capture(skip_print: bool = False, debug: bool = False):
+    """截图抓取模式：scrape → parse → 生成PDF → 打印"""
+    from capture.scraper import scrape
+    from parser.card_parser import parse_messages, sort_cards
+    from models.models import HomeworkDocument
+    from generator.pdf_generator import generate
+    from printer.printer import print_file
+    from datetime import date
+
+    messages = scrape(debug=debug)
+    if not messages:
+        logger.warning("未抓取到任何作业内容")
+        return
+
+    logger.info(f"抓取到 {len(messages)} 条消息，开始解析")
+    cards = parse_messages(messages)
+    cards = sort_cards(cards)
+
+    if not cards:
+        logger.warning("未解析到作业卡片，请检查 OCR 识别内容")
+        for m in messages:
+            logger.debug(f"  原始文本: {m.text[:80]!r}")
+        return
+
+    logger.info(f"解析出 {len(cards)} 科作业：")
+    for card in cards:
+        logger.info(f"  【{card.subject}】{card.items}")
+
+    doc_date = cards[0].date if cards else date.today()
+    document = HomeworkDocument(date=doc_date, cards=cards)
+
+    pdf_path = generate(document)
+    logger.info(f"PDF 已生成: {pdf_path}")
+    print(f"\nPDF 已生成: {pdf_path}")
+
+    if skip_print:
+        logger.info("--no-print 已设置，跳过打印")
+        return
+
+    from printer.printer import print_file
+    try:
+        print_file(pdf_path)
+        logger.info("打印任务已提交")
+        print("✓ 打印任务已提交")
+    except Exception as e:
+        logger.warning(f"打印失败（{e}），文档已保存: {pdf_path}")
+        print(f"打印失败：{e}\n文档已保存：{pdf_path}")
+
 
 
 def run_mock(input_path: str, skip_print: bool = False):
@@ -96,6 +148,11 @@ def main():
     if args.mock:
         logger.info("启动模式: Mock")
         run_mock(args.input, skip_print=args.no_print)
+        return
+
+    if args.capture:
+        logger.info("启动模式: Capture（截图抓取）")
+        run_capture(skip_print=args.no_print, debug=args.debug)
         return
 
     # 真实模式
