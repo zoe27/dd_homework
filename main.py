@@ -19,10 +19,17 @@ def parse_args():
                         help="mock 模式的输入文件（默认 tests/fixtures/sample_messages.json）")
     parser.add_argument("--no-print", action="store_true", help="跳过打印，只生成文档")
     parser.add_argument("--debug", action="store_true", help="capture 模式下保存调试截图")
+    parser.add_argument(
+        "--v2-continue",
+        action="store_true",
+        help="v2: 非今天不结束扫描，跳过旧卡继续找今日作业(最多6)（等同 CAPTURE_V2_ON_NON_TODAY=continue）",
+    )
     return parser.parse_args()
 
 
-def run_capture(skip_print: bool = False, debug: bool = False):
+def run_capture(
+    skip_print: bool = False, debug: bool = False, v2_continue: bool = False
+):
     """截图抓取模式：scrape → parse → 生成PDF → 打印"""
     from capture.scraper import scrape
     from parser.card_parser import parse_messages, sort_cards
@@ -31,7 +38,10 @@ def run_capture(skip_print: bool = False, debug: bool = False):
     from printer.printer import print_file
     from datetime import date
 
-    messages = scrape(debug=debug)
+    messages = scrape(
+        debug=debug,
+        on_non_today="continue" if v2_continue else None,
+    )
     if not messages:
         logger.warning("未抓取到任何作业内容")
         return
@@ -152,7 +162,11 @@ def main():
 
     if args.capture:
         logger.info("启动模式: Capture（截图抓取）")
-        run_capture(skip_print=args.no_print, debug=args.debug)
+        run_capture(
+            skip_print=args.no_print,
+            debug=args.debug,
+            v2_continue=args.v2_continue,
+        )
         return
 
     # 真实模式

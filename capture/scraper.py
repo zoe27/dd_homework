@@ -1,22 +1,24 @@
 """
-钉钉家校本自动抓取 v2 - 工作通知群入口
+钉钉作业抓取 v2 - 工作通知群入口
 
 流程：
-  1. OCR 左侧会话列表，找"工作通知:深圳市龙岗区"条目并点击
-  2. 右侧群聊消息区滚到底部
-  3. 从底部向上扫描，识别今天的作业卡片（"X月X日科目" + "XX老师 发布于"）
-  4. 点击卡片进入详情，找"去打印"坐标定位内容区，提取作业文字
-  5. 点击"去打印"左侧返回列表，处理下一个
-  6. 遇到非今天日期停止，返回 RawMessage 列表
+  1. 左侧会话找「工作通知:深圳市龙岗区」并进入
+  2. 消息区滚到底部
+  3. 自下而上：以「xx老师 发布于 YYYY-MM-DD」为严格去重主键，「查看详情」为点击目标
+  4. 进详情后向下滚到底，用「去打印」划分内容区，提取作业文字
+  5. 在「去打印」左侧点一下返回列表，向上滚，继续
+  6. 非今天：由 CAPTURE_V2_ON_NON_TODAY 控制停扫或继续找满（仅今日，最多6条）
 
 运行：python -m capture.scraper [--debug]
+     CAPTURE_V2_ON_NON_TODAY=continue  # 测试：不因非今天而停止
 """
 
 import sys
 import os
 import re
 import time
-from datetime import date, datetime
+import hashlib
+from datetime import date, datetime, time as dtime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -38,22 +40,26 @@ from utils.logger import logger
 import config
 
 # ── 参数 ──────────────────────────────────────────────────────────────────────
-RENDER_WAIT      = 1.5    # 点击后等待渲染（秒）
-SCROLL_WAIT      = 0.6    # 滚动后等待（秒）
-MAX_HOMEWORK     = 8      # 最多提取作业数
-MAX_SCROLL_STEPS = 40     # 最大滚动次数
-SAME_COUNT_STOP  = 2      # 连续相同次数判定到顶/底
-DEBUG_DIR        = os.path.join("output", "tmp", "captures")
+RENDER_WAIT         = 1.5    # 点击后等待渲染（秒）
+SCROLL_WAIT         = 0.6    # 滚动后等待（秒）
+MAX_HOMEWORK        = int(getattr(config, "CAPTURE_V2_MAX_HOMEWORK", 6))  # 最多提取作业数
+MAX_SCROLL_STEPS    = 40     # 最大滚动次数
+SAME_COUNT_STOP     = 2      # 连续相同次数判定到顶/底
+DEBUG_DIR           = os.path.join("output", "tmp", "captures")
+MAX_DETAIL_SCROLLS  = 15     # 详情页向下滑动次数（防止死循环）
+COMPARE_HEIGHT      = 100    # 详情页底部条带高度（与像素差比较）
+SIMILARITY_THRESH   = 5.0
+PAIR_Y_MAX_GAP      = 160    # 「发布于」行与「查看详情」按钮之间的最大 y 距（逻辑像素）
+DETAIL_SCROLL_DELTA = -10    # 详情页向下滑动（同消息区向下滑出更多内容）
 
 # 目标会话关键词
 TARGET_CONV_KEYWORDS = ["工作通知", "深圳市龙岗区"]
 
-SUBJECT_KEYWORDS = config.SUBJECT_ORDER
-RE_CARD_TITLE = re.compile(
-    r"(?:(\d{1,2})月)?(\d{1,2})日\s*(" +
-    "|".join(re.escape(s) for s in SUBJECT_KEYWORDS) + r")"
+# 主键：xx老师 发布于 年月日（与界面一致，用于去重；保留同 key 中较新一条即列表较下优先）
+RE_PUBLISH_FOR_KEY = re.compile(
+    r"(?P<name>.+?老师)\s*发布于\s*"
+    r"(?P<Y>\d{4})[./年\-]?(?P<M>\d{1,2})[./月\-]?(?P<D>\d{1,2})"
 )
-RE_TEACHER_POST = re.compile(r".{2,6}老师\s*发布于")
 
 
 # ── 基础操作 ──────────────────────────────────────────────────────────────────
@@ -208,131 +214,226 @@ def step2_scroll_to_bottom(window: dict, msg_cx: int, msg_cy: int,
     logger.warning("滚到底部超出最大步数")
 
 
-# ── 步骤3：向上扫描识别作业卡片 ──────────────────────────────────────────────
+# ── 步骤3：配对准则「老师 发布于 日期」+「查看详情」───────────────────────────
 
-def find_cards_in_results(results: list[OcrResult]) -> list[OcrResult]:
+def _tighten_view_detail(s: str) -> str:
+    return re.sub(r"\s+", "", (s or ""))
+
+
+def is_view_detail_button(r: OcrResult) -> bool:
+    t = _tighten_view_detail(r.text)
+    return t in ("查看详情", "点击详情")
+
+
+def parse_key_and_date_from_line(text: str) -> tuple[str, date] | None:
     """
-    从 OCR 结果中找今天的作业卡片标题。
-    条件：匹配"X月X日科目"且日期是今天。
+    从一行 OCR 解析严格主键「xx老师 发布于 YYYY-MM-DD」与 date。
     """
-    today = date.today()
-    cards = []
-    seen = set()
-    for r in results:
-        m = RE_CARD_TITLE.search(r.text)
-        if not m:
+    m = RE_PUBLISH_FOR_KEY.search((text or "").replace("：", ":"))
+    if not m:
+        return None
+    y, mo, d = int(m.group("Y")), int(m.group("M")), int(m.group("D"))
+    try:
+        dday = date(y, mo, d)
+    except ValueError:
+        return None
+    name = m.group("name").strip()
+    if not name.endswith("老师"):
+        return None
+    key = f"{name} 发布于 {dday.isoformat()}"
+    return (key, dday)
+
+
+def find_homework_entries(results: list[OcrResult]) -> list[dict]:
+    """
+    为每个「查看详情」找其正上方、距离最近的含「老师 + 发布于 + 日期」行。
+    自屏幕下方优先（y 大在前），同 key 只保留先出现的（时间更新）。
+    返回: [{ "key", "card_date", "detail_btn", "teacher_name" }, ...]
+    """
+    by_key: dict[str, dict] = {}
+    details = [r for r in results if is_view_detail_button(r) and r.conf >= 0.3]
+    details.sort(key=lambda r: r.y, reverse=True)
+    for dbtn in details:
+        others = [r for r in results if r is not dbtn and r.conf >= 0.25]
+        above = [
+            r for r in others
+            if r.y < dbtn.y
+            and (dbtn.y - r.y) <= PAIR_Y_MAX_GAP
+            and "发布于" in r.text
+            and "老师" in r.text
+        ]
+        if not above:
+            logger.debug("  无配对发布行，忽略该查看详情")
             continue
-        try:
-            month = int(m.group(1)) if m.group(1) else date.today().month
-            card_date = date(today.year, month, int(m.group(2)))
-        except ValueError:
+        teacher = max(above, key=lambda r: r.y)
+        parsed = parse_key_and_date_from_line(teacher.text)
+        if not parsed:
+            logger.debug(f"  无法解析主键: {teacher.text!r}")
             continue
-        subject = m.group(3)
-        if card_date == today and subject not in seen:
-            seen.add(subject)
-            cards.append(r)
-            logger.info(f"发现今天作业卡片: {r.text!r}  ({r.center_x},{r.center_y})")
-        elif card_date < today:
-            logger.info(f"发现非今天卡片 {card_date}，触发终止")
-    return cards
+        key, card_date = parsed
+        tname = key.split(" 发布于 ")[0]
+        if key not in by_key:
+            by_key[key] = {
+                "key": key,
+                "card_date": card_date,
+                "detail_btn": dbtn,
+                "teacher_name": tname,
+            }
+            logger.info(f"  作业条目 key={key!r} 详情按钮=({dbtn.center_x},{dbtn.center_y})")
+    return list(by_key.values())
 
 
-def is_old_date(results: list[OcrResult]) -> bool:
-    """检测是否出现昨天或更早的消息时间戳"""
-    today = date.today()
-    for r in results:
-        if "昨天" == r.text.strip() or r.text.strip().startswith("昨天 "):
-            logger.info(f"发现'昨天'时间戳: {r.text!r}")
-            return True
-        # 排除含截止/发布等卡片内容
-        if any(kw in r.text for kw in ["截止", "发布", "布置", "预计", "已完成"]):
+# ── 步骤4：详情内滚动到顶 + 提取 + 返回列表 ─────────────────────────────────
+
+def _crop_msg_from_boundary(img: Image.Image, window: dict, boundary_x: int) -> Image.Image:
+    """消息区右半部分，用于对比是否滚到底（逻辑 x >= boundary）。"""
+    x0 = int((boundary_x - window["x"]) * img.width / window["width"])
+    x0 = max(0, min(x0, img.width - 2))
+    return img.crop((x0, 0, img.width, img.height))
+
+
+def _detail_bottom_array(panel: Image.Image) -> np.ndarray:
+    h = min(COMPARE_HEIGHT, panel.height)
+    h0 = max(0, panel.height - h)
+    return np.array(panel.crop((0, h0, panel.width, panel.height)), dtype=np.float32)
+
+
+def is_detail_bottom_unchanged(img_a, img_b, window, boundary_x) -> bool:
+    a = _detail_bottom_array(_crop_msg_from_boundary(img_a, window, boundary_x))
+    b = _detail_bottom_array(_crop_msg_from_boundary(img_b, window, boundary_x))
+    if a.shape != b.shape:
+        return False
+    diff = float(np.abs(a - b).mean())
+    logger.info(f"详情区底部像素差: {diff:.2f}")
+    return diff < SIMILARITY_THRESH
+
+
+def ocr_from_boundary(results: list[OcrResult], boundary_x: int) -> list[OcrResult]:
+    return [r for r in results if r.x >= boundary_x - 2]
+
+
+def collect_lines_above_print(
+    results: list[OcrResult], print_btn: OcrResult | None, boundary_x: int
+) -> list[str]:
+    """只保留消息区内、在「去打印」上方的一行行文本（按 y 排序）。"""
+    skip_kw = [
+        "优秀作答", "如何被选", "去补交", "有疑问", "排行榜", "今日", "昨日",
+        "无需在线", "去打印",
+    ]
+    out = []
+    for r in sorted(ocr_from_boundary(results, boundary_x), key=lambda r: (r.y, r.x)):
+        if r.conf < 0.4:
             continue
-        for mo in re.finditer(r"(\d{1,2})[/月](\d{1,2})", r.text):
-            try:
-                d = date(today.year, int(mo.group(1)), int(mo.group(2)))
-                if d < today:
-                    logger.info(f"发现旧日期 {d}: {r.text!r}")
-                    return True
-            except ValueError:
-                pass
-    return False
+        if print_btn is not None and r.y >= print_btn.y:
+            continue
+        if any(kw in r.text for kw in skip_kw):
+            continue
+        out.append(r.text.strip())
+    return out
 
 
-# ── 步骤4：点开详情，提取作业内容 ────────────────────────────────────────────
-
-def step4_extract_detail(window: dict, card: OcrResult,
-                         debug: bool = False, idx: int = 0) -> str:
+def step4_open_detail_and_extract(
+    window: dict,
+    boundary_x: int,
+    msg_cx: int,
+    msg_cy: int,
+    detail_btn: OcrResult,
+    key: str,
+    debug: bool = False,
+    idx: int = 0,
+) -> str:
     """
-    点击作业卡片进入详情，提取作业内容，点击返回。
-    提取逻辑：找"去打印"坐标，取其上方区域的文字作为作业内容。
+    点击「查看详情」→ 详情区向下滚到底 → 合并 OCR 文本 → 在「去打印」左侧点返回。
     """
-    logger.info(f"=== 步骤4：提取详情 [{card.text}] ===")
+    logger.info(f"=== 进入详情: {key!r} ===")
     activate_dingtalk(window["pid"])
-    click(card.center_x, card.center_y)
+    click(detail_btn.center_x, detail_btn.center_y)
     time.sleep(RENDER_WAIT)
 
     img, scale = screenshot(window)
     if img is None:
         return ""
+
     if debug:
         save_debug(img, f"step4_detail_{idx:02d}.png")
 
-    results = ocr_region(img, scale, win_x=window["x"], win_y=window["y"])
-    logger.info(f"详情页 OCR {len(results)} 条")
-    for r in results:
-        logger.info(f"  [{r.x:4d},{r.y:4d}] conf={r.conf:.2f}  {r.text!r}")
+    all_lines: list[str] = []
+    seen: set[str] = set()
+    prev_img: Image.Image | None = None
 
-    # 找"去打印"坐标，作为内容区左边界和下边界参考
-    print_btn = None
-    for r in results:
-        if "去打印" in r.text:
-            print_btn = r
-            logger.info(f"找到'去打印': ({r.x},{r.y})")
+    def _one_pass(im: Image.Image, sc: float, tag: str) -> None:
+        rs = ocr_region(im, sc, win_x=window["x"], win_y=window["y"])
+        rm = ocr_from_boundary(rs, boundary_x)
+        pb = next((r for r in rm if "去打印" in r.text), None)
+        for line in collect_lines_above_print(rm, pb, boundary_x):
+            if line and line not in seen:
+                seen.add(line)
+                all_lines.append(line)
+        if debug and tag:
+            save_debug(im, f"step4_detail_{idx:02d}_{tag}.png")
+
+    if img is not None:
+        _one_pass(img, scale, "s0")
+        prev_img = img
+
+    for s_idx in range(MAX_DETAIL_SCROLLS):
+        activate_dingtalk(window["pid"])
+        scroll_at(msg_cx, msg_cy, DETAIL_SCROLL_DELTA)
+        time.sleep(SCROLL_WAIT)
+        curr, s2 = screenshot(window)
+        if curr is None:
             break
+        _one_pass(curr, s2, f"s{s_idx+1}")
+        if prev_img is not None and is_detail_bottom_unchanged(
+            curr, prev_img, window, boundary_x
+        ):
+            logger.info("详情区底部无变化，停止向下滚动")
+            break
+        prev_img = curr
+
+    text = "\n".join(all_lines)
+    logger.info(f"  合并详情（前120字）: {text[:120]!r}")
+
+    # 再截一帧用于点击「去打印」左侧
+    img, scale = screenshot(window)
+    if img is not None:
+        results = ocr_region(img, scale, win_x=window["x"], win_y=window["y"])
+        print_btn = next((r for r in ocr_from_boundary(results, boundary_x) if "去打印" in r.text), None)
+    else:
+        print_btn = None
 
     if print_btn is None:
-        logger.warning("未找到'去打印'，提取全部文字")
-        skip_kw = ["优秀作答", "如何被选", "去补交", "有疑问", "排行榜", "已完成", "预计需", "已截止"]
-        lines = [r.text for r in results if r.conf >= 0.4
-                 and not any(kw in r.text for kw in skip_kw)]
-        return "\n".join(lines)
+        back_x = boundary_x - 20
+        back_y = window["y"] + window["height"] // 2
+        logger.warning(f"未找到「去打印」，点击边界左侧 ({back_x},{back_y}) 尝试返回")
+    else:
+        back_x = print_btn.x - 24
+        back_y = print_btn.center_y
+        logger.info(f"在「去打印」左侧点击返回: ({back_x},{back_y})")
 
-    # 提取"去打印"上方的内容（y 坐标小于 print_btn.y）
-    # 同时过滤掉标题行以外的无关内容
-    skip_kw = ["优秀作答", "如何被选", "去补交", "有疑问", "排行榜",
-               "已完成", "预计需", "已截止", "今日", "昨日", "周沐曦"]
-    lines = []
-    for r in results:
-        if r.conf < 0.4:
-            continue
-        if r.y >= print_btn.y:
-            continue
-        if any(kw in r.text for kw in skip_kw):
-            logger.debug(f"  跳过: {r.text!r}")
-            continue
-        lines.append(r.text)
-        logger.debug(f"  保留: {r.text!r}")
-
-    text = "\n".join(lines)
-    logger.info(f"提取内容（前120字）: {text[:120]}")
-
-    # 点击"去打印"左侧返回列表
-    back_x = print_btn.x - 20
-    back_y = print_btn.center_y
-    logger.info(f"点击'去打印'左侧返回: ({back_x},{back_y})")
     activate_dingtalk(window["pid"])
-    click(back_x, back_y)
+    click(int(back_x), int(back_y))
     time.sleep(0.8)
-
     return text
 
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 
-def scrape(debug: bool = False) -> list[RawMessage]:
+def _non_today_mode() -> str:
+    v = (getattr(config, "CAPTURE_V2_ON_NON_TODAY", "stop") or "stop").lower().strip()
+    return "continue" if v in ("continue", "fill", "fill6", "c") else "stop"
+
+
+def scrape(
+    debug: bool = False,
+    on_non_today: str | None = None,
+) -> list[RawMessage]:
     """
-    通过工作通知群入口抓取今天的作业，返回 RawMessage 列表。
+    工作通知 v2：主键=「xx老师 发布于 YYYY-MM-DD」，点「查看详情」进内页，最多 MAX_HOMEWORK 条今日作业。
+    on_non_today: None=读 config，stop=早一天即停扫，continue=跳过非今天继续找满(仅今日)条
     """
+    mode = (on_non_today or _non_today_mode())
+    stop_on_past = mode != "continue"
     windows = find_dingtalk_windows()
     if not windows:
         raise RuntimeError("未找到钉钉窗口，请确认钉钉已启动并授权屏幕录制权限")
@@ -379,79 +480,110 @@ def scrape(debug: bool = False) -> list[RawMessage]:
 
     # 步骤2：滚到底部
     step2_scroll_to_bottom(window, msg_cx, msg_cy, debug)
-
-    # 步骤3+4：向上扫描，识别并提取作业
-    messages = []
-    seen_subjects: set[str] = set()
+    today = date.today()
+    seen_keys: set[str] = set()
+    messages: list[RawMessage] = []
     prev_img = None
     same_count = 0
+    should_stop = False
 
     for step in range(MAX_SCROLL_STEPS):
-        logger.info(f"--- 扫描步骤 {step+1} ---")
+        if should_stop or len(messages) >= MAX_HOMEWORK:
+            break
+        logger.info(f"--- 列表扫描 {step+1}（非今={mode}，今日最多 {MAX_HOMEWORK}）---")
         img, scale = screenshot(window)
         if img is None:
             break
         if debug:
             save_debug(img, f"step3_up_{step:03d}.png")
 
-        # 到顶判断
         if prev_img is not None and content_same(prev_img, img):
             same_count += 1
             if same_count >= SAME_COUNT_STOP:
-                logger.info("已到顶部，扫描结束")
+                logger.info("已到达消息列表顶部，结束")
                 break
         else:
             same_count = 0
         prev_img = img
 
-        # OCR 全图（不裁剪，避免截断消息区左侧内容）
         results = ocr_region(img, scale, win_x=window["x"], win_y=window["y"])
-        # 只保留消息区的结果（x > boundary_x）
         results = [r for r in results if r.x >= boundary_x]
         logger.info(f"消息区 OCR {len(results)} 条")
         for r in results:
             logger.info(f"  [{r.x:4d},{r.y:4d}] conf={r.conf:.2f}  {r.text!r}")
 
-        # 终止：发现旧日期
-        if is_old_date(results):
-            logger.info("发现旧日期，停止扫描")
+        entries = find_homework_entries(results)
+        # 自下而上：y 大优先；同屏只处理一条，避免点进详情后坐标失效
+        entries.sort(key=lambda e: e["detail_btn"].y, reverse=True)
+
+        picked: dict | None = None
+        for ent in entries:
+            if ent["key"] in seen_keys:
+                continue
+            cdate = ent["card_date"]
+            if cdate < today:
+                if stop_on_past:
+                    logger.info(
+                        f"主键 {ent['key']!r} 发布日早于今天，按 stop 规则结束扫描"
+                    )
+                    should_stop = True
+                    break
+                logger.info(
+                    f"主键 {ent['key']!r} 非今天，按 continue 规则跳过"
+                )
+                continue
+            if cdate > today:
+                continue
+            picked = ent
             break
 
-        # 找今天的作业卡片
-        cards = find_cards_in_results(results)
-        for card in cards:
-            m = RE_CARD_TITLE.search(card.text)
-            subject = m.group(3) if m else card.text
-            if subject in seen_subjects:
-                logger.info(f"科目[{subject}]已收集，跳过")
-                continue
-            seen_subjects.add(subject)
+        if should_stop or len(messages) >= MAX_HOMEWORK:
+            break
 
-            text = step4_extract_detail(window, card, debug=debug,
-                                        idx=len(messages))
-            if text:
-                messages.append(RawMessage(
-                    msg_id=f"v2_{step}_{subject}",
-                    sender_id="capture",
-                    sender_name="工作通知群",
-                    timestamp=datetime.now(),
-                    msg_type="text",
-                    text=text,
-                ))
-                logger.info(f"已收集[{subject}]，共{len(messages)}科")
+        if picked is not None:
+            seen_keys.add(picked["key"])
+            cdate = picked["card_date"]
+            text = step4_open_detail_and_extract(
+                window,
+                boundary_x,
+                msg_cx,
+                msg_cy,
+                picked["detail_btn"],
+                picked["key"],
+                debug=debug,
+                idx=len(messages),
+            )
+            if text.strip():
+                h = hashlib.md5(
+                    picked["key"].encode("utf-8")
+                ).hexdigest()[:12]
+                n = len(messages)
+                messages.append(
+                    RawMessage(
+                        msg_id=f"v2_{n}_{h}",
+                        sender_id="capture",
+                        sender_name=picked.get("teacher_name", "工作通知群"),
+                        timestamp=datetime.combine(
+                            cdate, dtime(0, 0, 0)
+                        ),
+                        msg_type="text",
+                        text=text.strip(),
+                    )
+                )
+                logger.info(f"已收第 {len(messages)} 条: {picked['key']!r}")
 
-            if len(messages) >= MAX_HOMEWORK:
-                logger.info(f"已达最大数量 {MAX_HOMEWORK}，停止")
-                return messages
+        if should_stop or len(messages) >= MAX_HOMEWORK:
+            break
 
-        # 向上滚动（1/3 内容区高度）
         content_h = window["height"] * 0.65
         delta = max(8, int(content_h / 3 / 10))
         activate_dingtalk(window["pid"])
         scroll_at(msg_cx, msg_cy, delta)
         time.sleep(SCROLL_WAIT)
 
-    logger.info(f"=== 抓取完成，共 {len(messages)} 科作业 ===")
+    logger.info(
+        f"=== 抓取完成，共 {len(messages)} 条；模式={mode}；主键去重 {len(seen_keys)} 个==="
+    )
     return messages
 
 

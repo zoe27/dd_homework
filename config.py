@@ -29,3 +29,8 @@ PRINTER_NAME = os.getenv("PRINTER_NAME", "")
 # ── 日志 ──────────────────────────────────────────────────────────────────────
 LOG_DIR   = "./logs"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# ── 截图 v2 工作通知抓取 ────────────────────────────────────────────────────────
+# stop：遇到发布日期早于今天则停止向上扫描；continue：跳过非今天卡片继续找，直至凑满 MAX 或到顶
+CAPTURE_V2_ON_NON_TODAY = os.getenv("CAPTURE_V2_ON_NON_TODAY", "stop")
+CAPTURE_V2_MAX_HOMEWORK = int(os.getenv("CAPTURE_V2_MAX_HOMEWORK", "6"))
