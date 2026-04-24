@@ -331,7 +331,7 @@ def collect_lines_above_print(
             continue
         if print_btn is not None and r.y >= print_btn.y:
             continue
-        if r.x < (print_btn.x - 50):
+        if print_btn is not None and r.x <= (print_btn.x - 2):
             continue
         if any(kw in r.text for kw in skip_kw):
             continue
@@ -513,7 +513,18 @@ def scrape(
             same_count = 0
         prev_img = img
 
-        results = ocr_region(img, scale, win_x=window["x"], win_y=window["y"])
+        # results = ocr_region(img, scale, win_x=window["x"], win_y=window["y"])
+        x1 = int((boundary_x - window["x"]) * scale)
+
+        results = ocr_region(
+            img,
+            scale,
+            win_x=window["x"],
+            win_y=window["y"],
+            crop=(x1, 0, img.width, img.height)
+        )
+        # results = ocr_region(img, scale, win_x=window["x"], win_y=window["y"],
+        #                      crop=(boundary_x, 0, img.width, img.height))
         results = [r for r in results if r.x >= boundary_x]
         logger.info(f"消息区 OCR {len(results)} 条")
         for r in results:
@@ -599,7 +610,8 @@ def scrape(
 if __name__ == "__main__":
     debug_mode = "--debug" in sys.argv
     # --all-dates: 测试用，忽略日期过滤，抓所有作业不管是不是今天
-    all_dates = "--all-dates" in sys.argv
+    # all_dates = "--all-dates" in sys.argv
+    all_dates = "--all-dates"
     on_non_today = "continue" if all_dates else None
     if all_dates:
         logger.info("--all-dates 模式：忽略日期过滤，抓所有作业")
