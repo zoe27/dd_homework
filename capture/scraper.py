@@ -327,7 +327,7 @@ def collect_lines_above_print(
     ]
     out = []
     for r in sorted(ocr_from_boundary(results, boundary_x), key=lambda r: (r.y, r.x)):
-        if r.conf < 0.4:
+        if r.conf < 0.3:
             continue
         if print_btn is not None and r.y >= print_btn.y:
             continue
